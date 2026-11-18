@@ -1,4 +1,8 @@
-"""采集监控 分析看板接口：汇总指标、参数运行与结果导出。"""
+"""采集监控 分析看板接口：周期指标、导出包接力核对与待审清单。
+
+固定路径（``/report-packages``、``/report-checks``）必须声明在 ``/{entry_id}``
+之前，否则会被当成监控面板编号。
+"""
 from __future__ import annotations
 
 import csv
@@ -6,10 +10,10 @@ import io
 import random
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from app.schemas import ActionPayload, ActionResult, EntryPayload
+from app.schemas import ActionResult, EntryPayload
 from app.services.monitor import MonitorService
 
 router = APIRouter(prefix="/api/monitor", tags=["采集监控"])
@@ -25,6 +29,61 @@ def csv_cell(value: Any) -> str:
     return '"' + text.replace('"', '""') + '"'
 
 
+# ----------------------------------------------------------------------
+# 完整报告导出包的接力
+# ----------------------------------------------------------------------
+@router.get("/report-packages")
+def list_report_packages(period: str | None = Query(default=None)) -> dict[str, Any]:
+    """采集监控视角的导出包清单：批次版本、冻结版本、线上版本与核查状态。"""
+    return service.list_report_packages(period=period)
+
+
+@router.get("/report-packages/{package_no}")
+def get_report_package(package_no: str) -> dict[str, Any]:
+    """读取采集报告冻结的完整导出包；不存在时给出可读说明。"""
+    package = service.get_report_package(package_no)
+    if package is None:
+        raise HTTPException(status_code=404, detail=f"导出包 {package_no} 不存在或已失效")
+    return package
+
+
+@router.post("/report-packages/sync")
+def sync_report_package(payload: EntryPayload) -> ActionResult:
+    """同步重算完整报告导出包并生成待审清单。
+
+    不传包编号时，按统计周期取最新导出包；周期还没有导出包时由监控侧
+    冻结一份再核对，保证跨模块接力不会因为"报告还没点导出"而断链。
+    """
+    record, message = service.sync_report_package(payload.values or {})
+    if record is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=record)
+
+
+@router.get("/report-checks")
+def list_report_checks(
+    period: str | None = Query(default=None),
+    package_no: str | None = Query(default=None),
+    batch_version: int | None = Query(default=None),
+    only_pending: bool = Query(default=False),
+) -> dict[str, Any]:
+    """监控核查记录（含待审清单），可被采集报告按批次回查。"""
+    return service.list_checks(
+        period=period, package_no=package_no,
+        batch_version=batch_version, only_pending=only_pending)
+
+
+@router.get("/report-checks/{record_no}")
+def get_report_check(record_no: str) -> dict[str, Any]:
+    record = service.get_check(record_no)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"监控核查记录 {record_no} 不存在")
+    return record
+
+
+# ----------------------------------------------------------------------
+# 原有看板能力
+# ----------------------------------------------------------------------
 @router.get("/summary")
 def get_summary() -> dict[str, Any]:
     return {"metrics": [
